@@ -1,4 +1,3 @@
-import sys
 import time
 
 import torch
@@ -28,26 +27,30 @@ def apply_flatten(block: nn.Module) -> None:
     block._flat_param = flat
 
 
-def main():
-    offload = sys.argv[1] == "offload" if len(sys.argv) > 1 else False
+def prepare_pipeline():
     ckpt = "/warehouse/FLUX.1-dev/"
     pipe = FluxPipeline.from_pretrained(ckpt, torch_dtype=torch.bfloat16)
-    if offload:
-        pipe.enable_model_cpu_offload()
-    else:
-        pipe.to("cuda")
+
+    device = "cuda"
+    pipe.vae.to(device)
+    pipe.text_encoder.to(device)
+    pipe.text_encoder_2.to(device)
+    # pipe.transformer.to(device)
+    if pipe.image_encoder is not None:
+        pipe.image_encoder.to(device)
+    if pipe.feature_extractor is not None:
+        pipe.feature_extractor.to(device)
+    return pipe
+
+
+def main():
+    pipe = prepare_pipeline()
 
     # Apply flatten to every transformer block (must be after .to / offload)
     for block in pipe.transformer.transformer_blocks:
         apply_flatten(block)
     for block in pipe.transformer.single_transformer_blocks:
         apply_flatten(block)
-
-    # Print flat param sizes for verification
-    for i, block in enumerate(pipe.transformer.transformer_blocks):
-        print(f"transformer_blocks[{i}]: _flat_param numel = {block._flat_param.numel()}")
-    for i, block in enumerate(pipe.transformer.single_transformer_blocks):
-        print(f"single_transformer_blocks[{i}]: _flat_param numel = {block._flat_param.numel()}")
 
     prompt = "A cat holding a sign that says hello world"
     # warmup
