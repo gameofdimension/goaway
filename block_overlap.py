@@ -1,5 +1,6 @@
 import contextlib
 import logging
+import sys
 import time
 
 import torch
@@ -17,12 +18,32 @@ def use_stream(stream: torch.cuda.Stream):
     torch.cuda.set_stream(current)
 
 
+def naive_onload(module: torch.nn.Module, device, non_blocking):
+    module.to(device, non_blocking=non_blocking)
+
+
+def naive_offload(module: torch.nn.Module):
+    module.to(device="cpu", non_blocking=False)
+
+
+def smart_onload(module: torch.nn.Module, device, non_blocking):
+    for p in module.parameters():
+        assert p.grad_fn is None
+        p.data = p.data.to(device, non_blocking=non_blocking)
+
+
+def smart_offload(module: torch.nn.Module):
+    for p in module.parameters():
+        assert module._cpu_state_dict[p].device.type == "cpu"
+        p.data = module._cpu_state_dict[p]
+
+
 def offload_prepare(
     transformer: FluxTransformer2DModel,
     device,
     non_blocking: bool,
     overlap: bool,
-    cleanup: bool,
+    smart: bool,
 ):
     compute_stream = torch.cuda.current_stream()
     collect_stream = torch.cuda.Stream() if overlap else compute_stream
@@ -44,15 +65,19 @@ def offload_prepare(
         hidden_states = old_forward(*args, **kwargs)
         with use_stream(collect_stream):
             collect_stream.wait_event(self.last_event)
-            self.last_layer.to(device="cpu", non_blocking=False)
-            if cleanup:
-                torch.cuda.empty_cache()
+            if smart:
+                smart_offload(self.last_layer)
+            else:
+                naive_offload(self.last_layer)
 
         return hidden_states
 
     def block_forward(self, *args, **kwargs):
         with use_stream(collect_stream):
-            self.to(device=device, non_blocking=non_blocking)
+            if smart:
+                smart_onload(self, device=device, non_blocking=non_blocking)
+            else:
+                naive_onload(self, device=device, non_blocking=non_blocking)
             gather_event = torch.cuda.Event()
             gather_event.record(collect_stream)
         with use_stream(compute_stream):
@@ -64,19 +89,34 @@ def offload_prepare(
             if transformer.last_event is not None:
                 assert transformer.last_layer is not None, "last_layer should not be None"
                 collect_stream.wait_event(transformer.last_event)
-                transformer.last_layer.to(device="cpu", non_blocking=False)
-                if cleanup:
-                    torch.cuda.empty_cache()
+                if smart:
+                    smart_offload(transformer.last_layer)
+                else:
+                    naive_offload(transformer.last_layer)
         transformer.last_event = compute_event
         transformer.last_layer = self
 
         return hidden_states
 
     for block in transformer.transformer_blocks:
+        block._cpu_state_dict = {}
+        for p in block.parameters():
+            assert p.data.device.type == "cpu"
+            if smart:
+                block._cpu_state_dict[p] = p.data.clone().pin_memory()
+            else:
+                p.data = p.data.pin_memory()
         block.old_forward = block.forward
         block.forward = block_forward.__get__(block)
 
     for block in transformer.single_transformer_blocks:
+        block._cpu_state_dict = {}
+        for p in block.parameters():
+            assert p.data.device.type == "cpu"
+            if smart:
+                block._cpu_state_dict[p] = p.data.clone().pin_memory()
+            else:
+                p.data = p.data.pin_memory()
         block.old_forward = block.forward
         block.forward = block_forward.__get__(block)
 
@@ -84,7 +124,7 @@ def offload_prepare(
     return transformer
 
 
-def prepare_pipeline():
+def prepare_pipeline(smart: bool):
     ckpt = "/warehouse/FLUX.1-dev/"
     pipe = FluxPipeline.from_pretrained(ckpt, torch_dtype=torch.bfloat16)
 
@@ -103,15 +143,17 @@ def prepare_pipeline():
         device=device,
         non_blocking=True,
         overlap=True,
-        cleanup=False,
+        smart=smart,
     )
     return pipe
 
 
 def main():
-    pipe = prepare_pipeline()
+    smart = sys.argv[1] == "smart"
+    pipe = prepare_pipeline(smart)
 
     prompt = "A cat holding a sign that says hello world"
+    prompt = "A motorcycle parked in an ornate bank lobby"
     # warmup
     image = pipe(
         prompt,
@@ -123,12 +165,13 @@ def main():
         generator=torch.Generator("cpu").manual_seed(0),
     ).images[0]
 
+    step = 30
     image = pipe(
         prompt,
         height=1024,
         width=1024,
         guidance_scale=3.5,
-        num_inference_steps=50,
+        num_inference_steps=step,
         max_sequence_length=512,
         generator=torch.Generator("cpu").manual_seed(0),
     ).images[0]

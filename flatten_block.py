@@ -53,6 +53,7 @@ def main():
         apply_flatten(block)
 
     prompt = "A cat holding a sign that says hello world"
+    prompt = "A motorcycle parked in an ornate bank lobby"
     # warmup
     image = pipe(
         prompt,
@@ -64,12 +65,13 @@ def main():
         generator=torch.Generator("cpu").manual_seed(0),
     ).images[0]
 
+    step = 30
     image = pipe(
         prompt,
         height=1024,
         width=1024,
         guidance_scale=3.5,
-        num_inference_steps=50,
+        num_inference_steps=step,
         max_sequence_length=512,
         generator=torch.Generator("cpu").manual_seed(0),
     ).images[0]
