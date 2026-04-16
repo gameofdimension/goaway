@@ -31,36 +31,22 @@ def offload_prepare(
     transformer.last_event = None
     transformer.last_layer = None
 
+    def root_modules_load(model):
+        for module in model.named_children():
+            if not isinstance(module[1], torch.nn.ModuleList):
+                module[1].to(device, non_blocking=non_blocking)
+            else:
+                assert module[0] in ["transformer_blocks", "single_transformer_blocks"], module[0]
+
+    root_modules_load(transformer)
+
     def transformer_forward(self, *args, **kwargs):
-        def root_modules_load():
-            for module in self.named_children():
-                if not isinstance(module[1], torch.nn.ModuleList):
-                    module[1].to(device, non_blocking=non_blocking)
-                else:
-                    assert module[0] in ["transformer_blocks", "single_transformer_blocks"], module[0]
-
-        def root_modules_offload():
-            for module in self.named_children():
-                if not isinstance(module[1], torch.nn.ModuleList):
-                    module[1].to("cpu", non_blocking=False)
-                else:
-                    assert module[0] in ["transformer_blocks", "single_transformer_blocks"], module[0]
-                    # assert module[0] == 'blocks', module[0]
-            if cleanup:
-                torch.cuda.empty_cache()
-
-        with use_stream(collect_stream):
-            root_modules_load()
-
         hidden_states = old_forward(*args, **kwargs)
         with use_stream(collect_stream):
             collect_stream.wait_event(self.last_event)
             self.last_layer.to(device="cpu", non_blocking=False)
             if cleanup:
                 torch.cuda.empty_cache()
-
-        with use_stream(collect_stream):
-            root_modules_offload()
 
         return hidden_states
 
