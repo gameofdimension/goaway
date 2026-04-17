@@ -27,11 +27,10 @@ def apply_flatten(block: nn.Module) -> None:
     block._flat_param = flat
 
 
-def prepare_pipeline():
+def prepare_pipeline(device):
     ckpt = "/warehouse/FLUX.1-dev/"
     pipe = FluxPipeline.from_pretrained(ckpt, torch_dtype=torch.bfloat16)
 
-    device = "cuda"
     pipe.vae.to(device)
     pipe.text_encoder.to(device)
     pipe.text_encoder_2.to(device)
@@ -44,8 +43,10 @@ def prepare_pipeline():
 
 
 def main():
-    pipe = prepare_pipeline()
+    device = "cuda"
+    pipe = prepare_pipeline(device)
 
+    pipe.transformer.to(device)
     # Apply flatten to every transformer block (must be after .to / offload)
     for block in pipe.transformer.transformer_blocks:
         apply_flatten(block)
