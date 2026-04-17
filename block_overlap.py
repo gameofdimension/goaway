@@ -104,8 +104,6 @@ def offload_prepare(
             assert p.data.device.type == "cpu"
             if smart:
                 block._cpu_state_dict[p] = p.data.clone().pin_memory()
-            else:
-                p.data = p.data.pin_memory()
         block.old_forward = block.forward
         block.forward = block_forward.__get__(block)
 
@@ -115,8 +113,6 @@ def offload_prepare(
             assert p.data.device.type == "cpu"
             if smart:
                 block._cpu_state_dict[p] = p.data.clone().pin_memory()
-            else:
-                p.data = p.data.pin_memory()
         block.old_forward = block.forward
         block.forward = block_forward.__get__(block)
 
