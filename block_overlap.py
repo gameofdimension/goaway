@@ -2,6 +2,7 @@ import contextlib
 import logging
 import sys
 import time
+from typing import cast
 
 import torch
 from diffusers import FluxPipeline, FluxTransformer2DModel
@@ -33,9 +34,10 @@ def smart_onload(module: torch.nn.Module, device, non_blocking):
 
 
 def smart_offload(module: torch.nn.Module):
+    cpu_state_dict: dict = cast(dict, getattr(module, "_cpu_state_dict", {}))
     for p in module.parameters():
-        assert module._cpu_state_dict[p].device.type == "cpu"
-        p.data = module._cpu_state_dict[p]
+        assert cpu_state_dict[p].device.type == "cpu"
+        p.data = cpu_state_dict[p]
 
 
 def offload_prepare(
@@ -48,9 +50,9 @@ def offload_prepare(
     compute_stream = torch.cuda.current_stream()
     collect_stream = torch.cuda.Stream() if overlap else compute_stream
 
-    old_forward = transformer.forward
-    transformer.last_event = None
-    transformer.last_layer = None
+    old_forward = transformer.forward  # type: ignore[attr-defined]
+    transformer.last_event = None  # type: ignore[attr-defined]
+    transformer.last_layer = None  # type: ignore[attr-defined]
 
     def root_modules_load(model):
         for module in model.named_children():
@@ -64,11 +66,11 @@ def offload_prepare(
     def transformer_forward(self, *args, **kwargs):
         hidden_states = old_forward(*args, **kwargs)
         with use_stream(collect_stream):
-            collect_stream.wait_event(self.last_event)
+            collect_stream.wait_event(self.last_event)  # type: ignore[attr-defined]
             if smart:
-                smart_offload(self.last_layer)
+                smart_offload(self.last_layer)  # type: ignore[attr-defined]
             else:
-                naive_offload(self.last_layer)
+                naive_offload(self.last_layer)  # type: ignore[attr-defined]
 
         return hidden_states
 
@@ -82,41 +84,41 @@ def offload_prepare(
             gather_event.record(collect_stream)
         with use_stream(compute_stream):
             compute_stream.wait_event(gather_event)
-            hidden_states = self.old_forward(*args, **kwargs)
+            hidden_states = self.old_forward(*args, **kwargs)  # type: ignore[attr-defined]
             compute_event = torch.cuda.Event()
             compute_event.record(compute_stream)
         with use_stream(collect_stream):
-            if transformer.last_event is not None:
-                assert transformer.last_layer is not None, "last_layer should not be None"
-                collect_stream.wait_event(transformer.last_event)
+            if transformer.last_event is not None:  # type: ignore[attr-defined]
+                assert transformer.last_layer is not None, "last_layer should not be None"  # type: ignore[attr-defined]
+                collect_stream.wait_event(transformer.last_event)  # type: ignore[attr-defined]
                 if smart:
-                    smart_offload(transformer.last_layer)
+                    smart_offload(transformer.last_layer)  # type: ignore[attr-defined]
                 else:
-                    naive_offload(transformer.last_layer)
-        transformer.last_event = compute_event
-        transformer.last_layer = self
+                    naive_offload(transformer.last_layer)  # type: ignore[attr-defined]
+        transformer.last_event = compute_event  # type: ignore[attr-defined]
+        transformer.last_layer = self  # type: ignore[attr-defined]
 
         return hidden_states
 
-    for block in transformer.transformer_blocks:
-        block._cpu_state_dict = {}
+    for block in transformer.transformer_blocks:  # type: ignore[attr-defined]
+        block._cpu_state_dict = {}  # type: ignore[attr-defined]
         for p in block.parameters():
             assert p.data.device.type == "cpu"
             if smart:
-                block._cpu_state_dict[p] = p.data.clone().pin_memory()
-        block.old_forward = block.forward
+                block._cpu_state_dict[p] = p.data.clone().pin_memory()  # type: ignore[attr-defined]
+        block.old_forward = block.forward  # type: ignore[attr-defined]
         block.forward = block_forward.__get__(block)
 
-    for block in transformer.single_transformer_blocks:
-        block._cpu_state_dict = {}
+    for block in transformer.single_transformer_blocks:  # type: ignore[attr-defined]
+        block._cpu_state_dict = {}  # type: ignore[attr-defined]
         for p in block.parameters():
             assert p.data.device.type == "cpu"
             if smart:
-                block._cpu_state_dict[p] = p.data.clone().pin_memory()
-        block.old_forward = block.forward
+                block._cpu_state_dict[p] = p.data.clone().pin_memory()  # type: ignore[attr-defined]
+        block.old_forward = block.forward  # type: ignore[attr-defined]
         block.forward = block_forward.__get__(block)
 
-    transformer.forward = transformer_forward.__get__(transformer)
+    transformer.forward = transformer_forward.__get__(transformer)  # type: ignore[attr-defined]
     return transformer
 
 
