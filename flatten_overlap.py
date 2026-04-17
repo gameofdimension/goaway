@@ -1,6 +1,5 @@
 import contextlib
 import logging
-import sys
 import time
 
 import torch
@@ -11,17 +10,10 @@ logger = logging.getLogger()
 
 
 def apply_flatten(block: nn.Module) -> None:
-    """Flatten all parameters of a block into a single 1D nn.Parameter (shared-storage).
-
-    After calling this, all individual parameters share storage with
-    ``block._flat_param`` — modifying one updates the others automatically.
-
-    **Must be called after** ``.to(device)``, otherwise the views become stale
-    after a subsequent device transfer.
-    """
     params = list(block.parameters())
     flat = torch.cat([p.detach().reshape(-1) for p in params])
     flat.requires_grad_(False)
+    flat = flat.pin_memory()
 
     offset = 0
     for p in params:
@@ -29,7 +21,8 @@ def apply_flatten(block: nn.Module) -> None:
         p.data = flat[offset : offset + numel].view(p.shape)
         offset += numel
 
-    block._flat_param = flat
+    assert flat.device.type == "cpu"
+    block._cpu_flat_param = flat
 
 
 @contextlib.contextmanager
@@ -41,24 +34,24 @@ def use_stream(stream: torch.cuda.Stream):
     torch.cuda.set_stream(current)
 
 
-def naive_onload(module: torch.nn.Module, device, non_blocking):
-    module.to(device, non_blocking=non_blocking)
-
-
-def naive_offload(module: torch.nn.Module):
-    module.to(device="cpu", non_blocking=False)
-
-
 def smart_onload(module: torch.nn.Module, device, non_blocking):
+    module._gpu_flat_param = module._cpu_flat_param.to(device, non_blocking=non_blocking)
+    flat = module._gpu_flat_param
+    offset = 0
     for p in module.parameters():
-        assert p.grad_fn is None
-        p.data = p.data.to(device, non_blocking=non_blocking)
+        numel = p.numel()
+        p.data = flat[offset : offset + numel].view(p.shape)
+        offset += numel
 
 
 def smart_offload(module: torch.nn.Module):
+    flat = module._cpu_flat_param
+    offset = 0
     for p in module.parameters():
-        assert module._cpu_state_dict[p].device.type == "cpu"
-        p.data = module._cpu_state_dict[p]
+        numel = p.numel()
+        p.data = flat[offset : offset + numel].view(p.shape)
+        offset += numel
+    module._gpu_flat_param = None
 
 
 def offload_prepare(
@@ -66,7 +59,6 @@ def offload_prepare(
     device,
     non_blocking: bool,
     overlap: bool,
-    smart: bool,
 ):
     compute_stream = torch.cuda.current_stream()
     collect_stream = torch.cuda.Stream() if overlap else compute_stream
@@ -88,19 +80,13 @@ def offload_prepare(
         hidden_states = old_forward(*args, **kwargs)
         with use_stream(collect_stream):
             collect_stream.wait_event(self.last_event)
-            if smart:
-                smart_offload(self.last_layer)
-            else:
-                naive_offload(self.last_layer)
+            smart_offload(self.last_layer)
 
         return hidden_states
 
     def block_forward(self, *args, **kwargs):
         with use_stream(collect_stream):
-            if smart:
-                smart_onload(self, device=device, non_blocking=non_blocking)
-            else:
-                naive_onload(self, device=device, non_blocking=non_blocking)
+            smart_onload(self, device=device, non_blocking=non_blocking)
             gather_event = torch.cuda.Event()
             gather_event.record(collect_stream)
         with use_stream(compute_stream):
@@ -112,30 +98,19 @@ def offload_prepare(
             if transformer.last_event is not None:
                 assert transformer.last_layer is not None, "last_layer should not be None"
                 collect_stream.wait_event(transformer.last_event)
-                if smart:
-                    smart_offload(transformer.last_layer)
-                else:
-                    naive_offload(transformer.last_layer)
+                smart_offload(transformer.last_layer)
         transformer.last_event = compute_event
         transformer.last_layer = self
 
         return hidden_states
 
     for block in transformer.transformer_blocks:
-        block._cpu_state_dict = {}
-        for p in block.parameters():
-            assert p.data.device.type == "cpu"
-            if smart:
-                block._cpu_state_dict[p] = p.data.clone().pin_memory()
+        apply_flatten(block)
         block.old_forward = block.forward
         block.forward = block_forward.__get__(block)
 
     for block in transformer.single_transformer_blocks:
-        block._cpu_state_dict = {}
-        for p in block.parameters():
-            assert p.data.device.type == "cpu"
-            if smart:
-                block._cpu_state_dict[p] = p.data.clone().pin_memory()
+        apply_flatten(block)
         block.old_forward = block.forward
         block.forward = block_forward.__get__(block)
 
@@ -143,7 +118,7 @@ def offload_prepare(
     return transformer
 
 
-def prepare_pipeline(smart: bool):
+def prepare_pipeline():
     ckpt = "/warehouse/FLUX.1-dev/"
     pipe = FluxPipeline.from_pretrained(ckpt, torch_dtype=torch.bfloat16)
 
@@ -162,14 +137,12 @@ def prepare_pipeline(smart: bool):
         device=device,
         non_blocking=True,
         overlap=True,
-        smart=smart,
     )
     return pipe
 
 
 def main():
-    smart = sys.argv[1] == "smart"
-    pipe = prepare_pipeline(smart)
+    pipe = prepare_pipeline()
 
     prompt = "A cat holding a sign that says hello world"
     prompt = "A motorcycle parked in an ornate bank lobby"
@@ -194,7 +167,7 @@ def main():
         max_sequence_length=512,
         generator=torch.Generator("cpu").manual_seed(0),
     ).images[0]
-    image.save(f"flux-dev-overlap-{int(time.time())}.png")
+    image.save(f"flux-dev-flatten-overlap-{int(time.time())}.png")
 
 
 if __name__ == "__main__":
