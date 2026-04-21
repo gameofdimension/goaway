@@ -11,14 +11,11 @@ logger = logging.getLogger()
 
 
 def apply_flatten(block: nn.Module) -> None:
-    # params = list(block.parameters())
     flat = torch.cat(
         [
             p.detach().reshape(-1)
             for n, p in block.named_parameters()
-            if not (
-                n.startswith("norm1.linear.") or n.startswith("norm1_context.linear.") or n.startswith("norm.linear.")
-            )
+            if not (n.startswith("norm1.linear.") or n.startswith("norm1_context.linear."))
         ]
     )
     flat.requires_grad_(False)
@@ -26,8 +23,7 @@ def apply_flatten(block: nn.Module) -> None:
 
     offset = 0
     for n, p in block.named_parameters():
-        if n.startswith("norm1.linear.") or n.startswith("norm1_context.linear.") or n.startswith("norm.linear."):
-            # print("name", n)
+        if n.startswith("norm1.linear.") or n.startswith("norm1_context.linear."):
             p.data = p.data.to("cuda", non_blocking=True)
             continue
         numel = p.numel()
@@ -53,8 +49,7 @@ def smart_onload(module: torch.nn.Module, device, non_blocking):
     module._gpu_flat_param = gpu_flat  # type: ignore[attr-defined]
     offset = 0
     for n, p in module.named_parameters():
-        if n.startswith("norm1.linear.") or n.startswith("norm1_context.linear.") or n.startswith("norm.linear."):
-            # print("name", n)
+        if n.startswith("norm1.linear.") or n.startswith("norm1_context.linear."):
             continue
         numel = p.numel()
         p.data = gpu_flat[offset : offset + numel].view(p.shape)
@@ -65,8 +60,7 @@ def smart_offload(module: torch.nn.Module):
     flat = cast(torch.Tensor, module._cpu_flat_param)
     offset = 0
     for n, p in module.named_parameters():
-        if n.startswith("norm1.linear.") or n.startswith("norm1_context.linear.") or n.startswith("norm.linear."):
-            # print("name", n)
+        if n.startswith("norm1.linear.") or n.startswith("norm1_context.linear."):
             continue
         numel = p.numel()
         p.data = flat[offset : offset + numel].view(p.shape)
@@ -176,26 +170,27 @@ def main():
         max_sequence_length=512,
         generator=torch.Generator("cpu").manual_seed(0),
     ).images[0]
+    torch.cuda.empty_cache()
 
     step = 30
-    # with torch.profiler.profile(
-    #     activities=[
-    #         torch.profiler.ProfilerActivity.CPU,
-    #         torch.profiler.ProfilerActivity.CUDA,
-    #     ],
-    #     profile_memory=True,
-    #     with_stack=True,
-    #     on_trace_ready=torch.profiler.tensorboard_trace_handler('./log/resnet18')
-    # ):
-    image = pipe(
-        prompt,
-        height=1024,
-        width=1024,
-        guidance_scale=3.5,
-        num_inference_steps=step,
-        max_sequence_length=512,
-        generator=torch.Generator("cpu").manual_seed(0),
-    ).images[0]
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        profile_memory=True,
+        with_stack=True,
+        on_trace_ready=torch.profiler.tensorboard_trace_handler("./log/resnet18"),
+    ):
+        image = pipe(
+            prompt,
+            height=1024,
+            width=1024,
+            guidance_scale=3.5,
+            num_inference_steps=step,
+            max_sequence_length=512,
+            generator=torch.Generator("cpu").manual_seed(0),
+        ).images[0]
     image.save(f"flux-dev-flatten-overlap-{int(time.time())}.png")
 
 
